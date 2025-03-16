@@ -25,6 +25,13 @@ Get-Content scripts/init.sql | docker exec -i  postgresql-b psql -U postgres -d 
 PGPASSWORD=postgres docker exec -i postgresql-b psql -U postgres -d books_db < scripts/init.sql
 docker exec -it app python insert_db.py 1000000 --batch-size 100000
 
+time docker exec -t postgresql-b pg_dump -U postgres -d books_db -F c -f /tmp/full_backup.dump
+
+docker cp postgresql-b:/tmp/full_backup.dump ./full_backup.dump
+
+docker cp ./full_backup.dump postgresql-b:/tmp/full_backup.dump
+time docker exec -t postgresql-b pg_restore -U postgres -d books_db /tmp/full_backup.dump
+
 docker compose -f docker-compose.yml down
 
 
