@@ -1,10 +1,10 @@
 # HSA13_hw21
 
-PostgreSQL backup strategies
+# PostgreSQL backup strategies
 
 This project demonstrates four different backup strategies for a PostgreSQL database containing a single books table.
 
-The backup strategies include:
+## The backup strategies include:
 ```
     Full backup - Using pg_dump to capture the entire database.
     Incremental backup - Using WAL archiving to track and replay database changes.
