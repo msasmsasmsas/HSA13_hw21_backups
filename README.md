@@ -5,183 +5,255 @@ PostgreSQL backup strategies
 This project demonstrates four different backup strategies for a PostgreSQL database containing a single books table.
 
 The backup strategies include:
-
+```
     Full backup - Using pg_dump to capture the entire database.
     Incremental backup - Using WAL archiving to track and replay database changes.
     Differential backup - Using pg_dump --data-only to periodically store only modified data.
     Reverse Delta backup - Storing the latest full dump and applying WAL logs to roll back step-by-step.
-
-Example of usage
-
-1. Full backup using pg_dump
-
-A full backup captures everything: schema, data, indexes, and constraints.
-
-```
-docker exec -t postgresql-b pg_dump -U postgres -d books_db -F c -f /tmp/full_backup.dump
 ```
 
-To restore:
-```
-docker exec -t postgresql-b pg_restore -U postgres -d books_db /tmp/full_backup.dump
-```
 
-Important!
+# PostgreSQL Backup Strategies with Python
 
-Actions before each next backup strategy:
-```
-    Comment - ./init.sql:/docker-entrypoint-initdb.d/init.sql volume instruction in postgres container before run docker-compose up
+This project demonstrates four different backup strategies for a PostgreSQL database containing a single `books` table, integrated with a Python application for data initialization and population.
 
-    Help script to create table and add some test data for books_db in postgres container:
+---
 
-    ./insert_books.sh   
-```
+## Prerequisites
+- Docker and Docker Compose installed
+- Python 3.x (for the app container)
+- Git
 
-2. Incremental backup using WAL (Write-Ahead Logging)
+---
 
-postgresql.conf with WAL settings enables WAL archiving and stores the WAL files in /var/lib/postgresql/wal_archive
+## Project Setup
 
-To copy from the container to local machine:
+Start the PostgreSQL and Python app containers:
 
 ```
-docker cp postgresql-b:/var/lib/postgresql/wal_archive ./wal_backup
+docker compose -f docker-compose.yml up -d
 ```
-Ensure a proper base backup is taken:
+
+Initialize the `books` table schema:
+
+- **Windows:**
 ```
-docker exec postgresql-b pg_basebackup -D /var/lib/postgresql/base_backup -Ft -z -P -X fetch
+Get-Content scripts/init.sql | docker exec -i postgresql-b psql -U postgres -d books_db
+```
+- **Linux/macOS:**
+```
+PGPASSWORD=postgres docker exec -i postgresql-b psql -U postgres -d books_db < scripts/init.sql
+```
+
+Populate the `books` table with sample data (e.g., 100,000 records, batch size 10,000):
+
+```
+docker exec -it app python insert_db.py 100000 --batch-size 10000
+```
+
+---
+
+## Backup Strategies
+
+### 1. Full Backup (using pg_dump)
+
+A full backup captures the entire database: schema, data, indexes, and constraints.
+
+**Create Full Backup:**
+```
+time docker exec -t postgresql-b pg_dump -U postgres -d books_db -F c -f /tmp/full_backup.dump
+```
+- `time` measures the execution duration.
+
+**Copy to Host:**
+```
+docker cp postgresql-b:/tmp/full_backup.dump ./full_backup.dump
+```
+
+**Restore Full Backup:**
+```
+time docker exec -t postgresql-b pg_restore -U postgres -d books_db /tmp/full_backup.dump
+```
+
+---
+
+### 2. Incremental Backup (using WAL)
+
+Incremental backups use Write-Ahead Logging (WAL) to track database changes.
+
+**Ensure WAL Archiving is Enabled:**
+- The `postgresql.conf` file must have `wal_level = replica`, `archive_mode = on`, and an `archive_command` set (see configuration above).
+
+**Create Base Backup:**
+```
+time docker exec postgresql-b pg_basebackup -D /var/lib/postgresql/base_backup -Ft -z -P -X fetch
+```
+```
 docker cp postgresql-b:/var/lib/postgresql/base_backup ./base_backup
 ```
-Perform some database changes to generate new WAL segments
 
-Copy the WAL logs:
+**Make Changes:**
+- Add more records to generate WAL segments:
 ```
-docker cp postgresql-b:/var/lib/postgresql/wal_archive ./wal_archive_backup
+docker exec -it app python insert_db.py 1000 --batch-size 500
 ```
 
-Restore the Base Backup
+**Copy WAL Logs:**
+```
+time docker cp postgresql-b:/var/lib/postgresql/wal_archive ./wal_archive_backup
+```
+
+**Restore Incremental Backup:**
+1. Stop the container and clear data:
 ```
 docker stop postgresql-b
 sudo rm -rf ./postgres_data
 ```
-
-Extract the base backup:
+2. Extract base backup:
 ```
 mkdir ./postgres_data
 tar -xvf ./base_backup/base.tar -C ./postgres_data
 ```
-
-Copy the extracted base backup to the container:
+3. Copy base backup to container:
 ```
 docker cp ./postgres_data postgresql-b:/var/lib/postgresql/data
 ```
-Start the container: docker start postgresql-b
-
-Copy back the archived WAL logs:
+4. Start the container:
+```
+docker start postgresql-b
+```
+5. Copy WAL logs back:
 ```
 docker cp ./wal_archive_backup postgresql-b:/var/lib/postgresql/wal_archive
 ```
+6. Replay WAL logs:
+```
+time docker exec postgresql-b psql -U postgres -d books_db -c "SELECT pg_wal_replay_resume();"
+```
 
-Start WAL replay inside postgres container:
-```
-docker exec postgresql-b psql -U postgres -d books_db -c "SELECT pg_wal_replay_resume();"
-```
-3. Differential backup using pg_dump --data-only
+---
 
-Take a full backup of your database using pg_dump:
+### 3. Differential Backup (using pg_dump --data-only)
+
+Differential backups store only modified data since the last full backup.
+
+**Create Full Backup (Baseline):**
 ```
-docker exec postgresql-b pg_dump -U postgres -d books_db -F c -f /var/lib/postgresql/data/full_backup.dump
+time docker exec postgresql-b pg_dump -U postgres -d books_db -F c -f /var/lib/postgresql/data/full_backup.dump
 ```
-Copy the full backup to the host machine:
 ```
 docker cp postgresql-b:/var/lib/postgresql/data/full_backup.dump ./full_backup.dump
 ```
-Perform some data changes for books_db
 
-Back up the schema separately to ensure structural integrity:
+**Make Changes:**
 ```
-docker exec postgresql-b pg_dump -U postgres -d books_db --schema-only -f /var/lib/postgresql/data/schema_backup.sql
+docker exec -it app python insert_db.py 5000 --batch-size 1000
+```
+
+**Backup Schema Separately:**
+```
+time docker exec postgresql-b pg_dump -U postgres -d books_db --schema-only -f /var/lib/postgresql/data/schema_backup.sql
+```
+```
 docker cp postgresql-b:/var/lib/postgresql/data/schema_backup.sql ./schema_backup.sql
 ```
-Instead of dumping the entire database, back up only modified tables:
+
+**Backup Modified Data:**
 ```
-docker exec postgresql-b pg_dump -U postgres -d books_db --data-only --table=books -f /var/lib/postgresql/data/books_diff_backup.sql
+time docker exec postgresql-b pg_dump -U postgres -d books_db --data-only --table=books -f /var/lib/postgresql/data/books_diff_backup.sql
 ```
-Copy the backup to the host:
 ```
 docker cp postgresql-b:/var/lib/postgresql/data/books_diff_backup.sql ./books_diff_backup.sql
 ```
-Rolling back to a previous state
 
-Stop the container and remove the database files:
+**Restore Differential Backup:**
+1. Stop the container and clear data:
 ```
 docker stop postgresql-b
-sudo rm -rf ./wal_archive ./postgres_data
+sudo rm -rf ./postgres_data ./wal_archive
 ```
-Ensure that, during restoration, the schema is restored first, followed by the differential data:
+2. Copy schema and differential data:
 ```
 docker cp ./schema_backup.sql postgresql-b:/var/lib/postgresql/data/schema_backup.sql
 docker cp ./books_diff_backup.sql postgresql-b:/var/lib/postgresql/data/books_diff_backup.sql
 ```
-Apply the schema backup:
+3. Apply schema:
 ```
-docker exec postgresql-b psql -U postgres -d books_db -f /var/lib/postgresql/data/schema_backup.sql
+time docker exec postgresql-b psql -U postgres -d books_db -f /var/lib/postgresql/data/schema_backup.sql
 ```
-Start the container: docker start postgresql-b
+4. Start the container:
+```
+docker start postgresql-b
+```
+5. Apply differential data:
+```
+time docker exec postgresql-b psql -U postgres -d books_db -f /var/lib/postgresql/data/books_diff_backup.sql
+```
 
-Apply the differential backup:
-```
-docker exec postgresql-b psql -U postgres -d books_db -f /var/lib/postgresql/data/books_diff_backup.sql
-```
-4. Reverse Delta Backup (Last full + WAL differences)
+---
 
-Create a full backup inside the container:
+### 4. Reverse Delta Backup (Latest Full + WAL)
+
+Reverse Delta backups store the latest full backup and use WAL logs to roll back to previous states.
+
+**Create Latest Full Backup:**
 ```
-docker exec postgresql-b pg_dump -U postgres -d books_db -F c -f /var/lib/postgresql/data/latest_full_backup.dump
+time docker exec postgresql-b pg_dump -U postgres -d books_db -F c -f /var/lib/postgresql/data/latest_full_backup.dump
 ```
-To copy the backup to the host machine:
 ```
 docker cp postgresql-b:/var/lib/postgresql/data/latest_full_backup.dump ./latest_full_backup.dump
 ```
-Add new records to books_db
 
-Copy the WAL logs from the container to the host:
+**Make Changes:**
 ```
-docker cp postgresql-b:/var/lib/postgresql/wal_archive ./wal_archive_backup
+docker exec -it app python insert_db.py 2000 --batch-size 500
 ```
-Rolling back to a previous state
 
-Stop the container and remove the database files:
+**Copy WAL Logs:**
+```
+time docker cp postgresql-b:/var/lib/postgresql/wal_archive ./wal_archive_backup
+```
+
+**Restore Reverse Delta Backup:**
+1. Stop the container and clear data:
 ```
 docker stop postgresql-b
-sudo rm -rf ./wal_archive ./postgres_data
+sudo rm -rf ./postgres_data ./wal_archive
 ```
-Restore the last full backup:
+2. Copy and restore the latest full backup:
 ```
 mkdir ./postgres_data
 docker cp ./latest_full_backup.dump postgresql-b:/var/lib/postgresql/data/latest_full_backup.dump
-docker exec postgresql-b pg_restore -U postgres -d books_db /var/lib/postgresql/data/latest_full_backup.dump
+time docker exec postgresql-b pg_restore -U postgres -d books_db /var/lib/postgresql/data/latest_full_backup.dump
 ```
-Copy back the stored WAL logs:
+3. Copy WAL logs back:
 ```
 docker cp ./wal_archive_backup postgresql-b:/var/lib/postgresql/wal_archive
 ```
-Start the container: docker start postgresql-b
-
-Then, use postgres point-in-time recovery:
+4. Start the container:
 ```
-docker exec postgresql-b psql -U postgres -d books_db -c "SELECT pg_wal_replay_resume();"
+docker start postgresql-b
 ```
-Comparison
-Backup Type 	Size 	Restore Speed 	Rollback Ability 	Cost
-Full (pg_dump) 	Large 	Fast 	Only to last backup 	Storage cost for full backup
-Incremental (WAL) 	Small 	Fast (Point-in-time) 	Precise rollback 	Requires WAL archiving setup
-Differential (pg_dump --data-only) 	Medium 	Moderate 	Only to last diff backup 	Saves space, but slower rollback
-Reverse Delta (pg_dump + WAL) 	Medium (Depends on change frequency; WAL grows quickly) 	Moderate 	Step-by-step rollback to previous known snapshots 	Storage cost for WAL
+5. Replay WAL logs for point-in-time recovery:
+```
+time docker exec postgresql-b psql -U postgres -d books_db -c "SELECT pg_wal_replay_resume();"
+```
 
-Full backup – suitable for small amounts of data or infrequent backups.
+---
 
-Incremental – saves storage space but is complex to restore. Suitable for large, frequently changing data.
+## Comparison of Backup Strategies
 
-Differential – a compromise between Full and Incremental, suitable for medium-sized data.
+| Backup Type                  | Size                          | Restore Speed         | Rollback Ability            | Cost                          |
+|------------------------------|-------------------------------|-----------------------|-----------------------------|-------------------------------|
+| Full (pg_dump)              | Large                        | Fast                 | Only to last backup         | High storage cost            |
+| Incremental (WAL)           | Small                        | Fast (Point-in-time) | Precise rollback            | WAL archiving setup          |
+| Differential (pg_dump --data-only) | Medium                  | Moderate             | Only to last diff backup    | Saves space, slower rollback |
+| Reverse Delta (pg_dump + WAL) | Medium (WAL grows quickly) | Moderate             | Step-by-step rollback       | Storage cost for WAL         |
 
-Reverse Delta – convenient when fast recovery of the latest version is important (e.g., for cloud services or CDNs).
+### Recommendations:
+- **Full Backup:** Ideal for small datasets or infrequent backups.  
+- **Incremental Backup:** Best for large, frequently changing data with minimal storage use.  
+- **Differential Backup:** A compromise for medium-sized datasets with moderate rollback needs.  
+- **Reverse Delta Backup:** Useful for fast recovery of the latest state (e.g., cloud services).
+
+---
